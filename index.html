@@ -34,7 +34,6 @@ button{font-family:var(--font-sans);font-size:13px;cursor:pointer;}
 .pill-bear{background:var(--color-background-danger);color:var(--color-text-danger);}
 .pill-neut{background:var(--color-background-secondary);color:var(--color-text-secondary);}
 .pill-info{background:var(--color-background-info);color:var(--color-text-info);}
-.pill-warn{background:var(--color-background-warning);color:var(--color-text-warning);}
 .trade-box{display:flex;align-items:center;gap:12px;padding:0.75rem 1rem;border-radius:var(--border-radius-md);margin-bottom:1rem;}
 .trade-box.long{background:var(--color-background-success);border:0.5px solid var(--color-border-success);}
 .trade-box.short{background:var(--color-background-danger);border:0.5px solid var(--color-border-danger);}
@@ -101,23 +100,19 @@ button{font-family:var(--font-sans);font-size:13px;cursor:pointer;}
     </select>
     <button class="btn-primary" id="analyzeBtn" onclick="runAnalysis()">Analyze</button>
   </div>
-
   <div class="metrics">
     <div class="metric"><div class="metric-label">Price</div><div class="metric-value" id="m-price">—</div></div>
     <div class="metric"><div class="metric-label">24h change</div><div class="metric-value" id="m-change">—</div></div>
     <div class="metric"><div class="metric-label">Volume</div><div class="metric-value" id="m-vol">—</div></div>
     <div class="metric"><div class="metric-label">Bias</div><div class="metric-value" id="m-bias">—</div></div>
   </div>
-
   <div class="ind-row">
     <div class="ind-card"><div class="ind-name">RSI (14)</div><div class="ind-value" id="ind-rsi">—</div><div class="pill pill-neut" id="ind-rsi-s">—</div></div>
     <div class="ind-card"><div class="ind-name">MACD</div><div class="ind-value" id="ind-macd">—</div><div class="pill pill-neut" id="ind-macd-s">—</div></div>
     <div class="ind-card"><div class="ind-name">EMA 20/50</div><div class="ind-value" id="ind-ema">—</div><div class="pill pill-neut" id="ind-ema-s">—</div></div>
     <div class="ind-card"><div class="ind-name">Structure</div><div class="ind-value" id="ind-ms">—</div><div class="pill pill-neut" id="ind-ms-s">—</div></div>
   </div>
-
   <div id="candle-container" style="display:none;"><div class="candle-chart" id="candle-chart"></div></div>
-
   <div id="analysis-output" style="display:none;">
     <div class="card">
       <h3>Trade setup</h3>
@@ -141,7 +136,6 @@ button{font-family:var(--font-sans);font-size:13px;cursor:pointer;}
     </div>
     <button class="btn-outline" style="font-size:12px;padding:6px 12px;" onclick="sendToSizer()">Use in position sizer</button>
   </div>
-
   <div id="a-error" style="display:none;" class="error-box"></div>
   <div id="a-loading" style="display:none;" class="loading-text">Fetching market data...</div>
 </div>
@@ -238,7 +232,6 @@ button{font-family:var(--font-sans);font-size:13px;cursor:pointer;}
 </div>
 
 <script>
-const PROXY = 'https://api.allorigins.win/get?url=';
 let trades = [];
 let lastAnalysis = null;
 
@@ -252,50 +245,72 @@ function switchTab(t){
 function fmt(n,d=2){return parseFloat(n).toFixed(d);}
 function fmtK(n){n=parseFloat(n);if(n>=1e9)return(n/1e9).toFixed(1)+'B';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return fmt(n);}
 
-async function binanceFetch(path){
-  const url = encodeURIComponent('https://api.binance.com/api/v3'+path);
-  const r = await fetch(PROXY+url);
-  const wrapper = await r.json();
-  return JSON.parse(wrapper.contents);
+async function fetchWithFallback(path) {
+  const base = 'https://api.binance.com/api/v3' + path;
+
+  const proxies = [
+    async () => {
+      const r = await fetch('https://corsproxy.io/?' + encodeURIComponent(base));
+      if (!r.ok) throw new Error('corsproxy failed');
+      return r.json();
+    },
+    async () => {
+      const r = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(base));
+      if (!r.ok) throw new Error('allorigins failed');
+      const w = await r.json();
+      if (!w.contents) throw new Error('allorigins empty');
+      return JSON.parse(w.contents);
+    },
+    async () => {
+      const r = await fetch('https://thingproxy.freeboard.io/fetch/' + base);
+      if (!r.ok) throw new Error('thingproxy failed');
+      return r.json();
+    }
+  ];
+
+  let lastErr;
+  for (const proxy of proxies) {
+    try {
+      const data = await proxy();
+      if (!data) throw new Error('empty response');
+      return data;
+    } catch(e) {
+      lastErr = e;
+    }
+  }
+  throw new Error('All proxies failed: ' + lastErr.message);
 }
 
-async function fetchKlines(sym,iv,limit=100){
-  const d=await binanceFetch(`/klines?symbol=${sym}&interval=${iv}&limit=${limit}`);
-  return d.map(k=>({o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4]),v:parseFloat(k[5])}));
+async function fetchKlines(sym, iv, limit=100) {
+  const d = await fetchWithFallback(`/klines?symbol=${sym}&interval=${iv}&limit=${limit}`);
+  if (!Array.isArray(d)) throw new Error('Klines response is not an array — proxy may be returning HTML or an error object.');
+  return d.map(k => ({
+    o: parseFloat(k[1]), h: parseFloat(k[2]),
+    l: parseFloat(k[3]), c: parseFloat(k[4]), v: parseFloat(k[5])
+  }));
 }
 
-async function fetchTicker(sym){
-  return await binanceFetch(`/ticker/24hr?symbol=${sym}`);
+async function fetchTicker(sym) {
+  const d = await fetchWithFallback(`/ticker/24hr?symbol=${sym}`);
+  if (Array.isArray(d) || !d.priceChangePercent) throw new Error('Ticker response invalid.');
+  return d;
 }
 
-function calcRSI(cl,p=14){
-  let g=0,l=0;
-  for(let i=1;i<=p;i++){const d=cl[i]-cl[i-1];if(d>0)g+=d;else l+=Math.abs(d);}
-  let ag=g/p,al=l/p;
-  for(let i=p+1;i<cl.length;i++){const d=cl[i]-cl[i-1];ag=(ag*(p-1)+(d>0?d:0))/p;al=(al*(p-1)+(d<0?Math.abs(d):0))/p;}
-  if(al===0)return 100;
-  return 100-(100/(1+ag/al));
-}
+function calcRSI(cl,p=14){let g=0,l=0;for(let i=1;i<=p;i++){const d=cl[i]-cl[i-1];if(d>0)g+=d;else l+=Math.abs(d);}let ag=g/p,al=l/p;for(let i=p+1;i<cl.length;i++){const d=cl[i]-cl[i-1];ag=(ag*(p-1)+(d>0?d:0))/p;al=(al*(p-1)+(d<0?Math.abs(d):0))/p;}if(al===0)return 100;return 100-(100/(1+ag/al));}
 function calcEMA(cl,p){const k=2/(p+1);let e=cl[0];for(let i=1;i<cl.length;i++)e=cl[i]*k+e*(1-k);return e;}
 function calcMACD(cl){return calcEMA(cl,12)-calcEMA(cl,26);}
-function detectStructure(kl){
-  const h=kl.map(k=>k.h),l=kl.map(k=>k.l);
-  const rh=Math.max(...h.slice(-20)),ph=Math.max(...h.slice(-40,-20));
-  const rl=Math.min(...l.slice(-20)),pl=Math.min(...l.slice(-40,-20));
-  if(rh>ph&&rl>pl)return 'bullish HH/HL';
-  if(rh<ph&&rl<pl)return 'bearish LL/LH';
-  return 'ranging';
-}
+function detectStructure(kl){const h=kl.map(k=>k.h),l=kl.map(k=>k.l);const rh=Math.max(...h.slice(-20)),ph=Math.max(...h.slice(-40,-20));const rl=Math.min(...l.slice(-20)),pl=Math.min(...l.slice(-40,-20));if(rh>ph&&rl>pl)return 'bullish HH/HL';if(rh<ph&&rl<pl)return 'bearish LL/LH';return 'ranging';}
 
 function getIndicators(klines){
   const cl=klines.map(k=>k.c);
-  const price=cl[cl.length-1];
-  const rsi=calcRSI(cl),macd=calcMACD(cl);
-  const ema20=calcEMA(cl,20),ema50=calcEMA(cl,50);
-  const structure=detectStructure(klines);
-  const sh=Math.max(...klines.map(k=>k.h).slice(-30));
-  const sl2=Math.min(...klines.map(k=>k.l).slice(-30));
-  return{price,rsi,macd,ema20,ema50,structure,swing_high:fmt(sh),swing_low:fmt(sl2)};
+  return {
+    price: cl[cl.length-1],
+    rsi: calcRSI(cl), macd: calcMACD(cl),
+    ema20: calcEMA(cl,20), ema50: calcEMA(cl,50),
+    structure: detectStructure(klines),
+    swing_high: fmt(Math.max(...klines.map(k=>k.h).slice(-30))),
+    swing_low: fmt(Math.min(...klines.map(k=>k.l).slice(-30)))
+  };
 }
 
 function setIndicatorUI(rsi,macd,ema20,ema50,structure){
@@ -308,10 +323,10 @@ function setIndicatorUI(rsi,macd,ema20,ema50,structure){
   else{rs.textContent='neutral';rs.className='pill pill-neut';}
   document.getElementById('ind-macd').textContent=fmt(macd,4);
   const ms=document.getElementById('ind-macd-s');
-  if(macd>0){ms.textContent='bullish';ms.className='pill pill-bull';}else{ms.textContent='bearish';ms.className='pill pill-bear';}
+  macd>0?(ms.textContent='bullish',ms.className='pill pill-bull'):(ms.textContent='bearish',ms.className='pill pill-bear');
   document.getElementById('ind-ema').textContent=fmt(ema20,0)+'/'+fmt(ema50,0);
   const es=document.getElementById('ind-ema-s');
-  if(ema20>ema50){es.textContent='bullish cross';es.className='pill pill-bull';}else{es.textContent='bearish cross';es.className='pill pill-bear';}
+  ema20>ema50?(es.textContent='bullish cross',es.className='pill pill-bull'):(es.textContent='bearish cross',es.className='pill pill-bear');
   document.getElementById('ind-ms').textContent=structure.split(' ')[0];
   const mss=document.getElementById('ind-ms-s');
   if(structure.includes('bull')){mss.textContent='uptrend';mss.className='pill pill-bull';}
@@ -326,10 +341,8 @@ function renderCandles(klines){
   const rng=mxH-mnL||1;
   chart.innerHTML='';
   sl.forEach(k=>{
-    const bull=k.c>=k.o;
-    const bTop=Math.max(k.o,k.c),bBot=Math.min(k.o,k.c);
-    const bH=((bTop-bBot)/rng*100);
-    const bp=((bBot-mnL)/rng*100);
+    const bull=k.c>=k.o,bTop=Math.max(k.o,k.c),bBot=Math.min(k.o,k.c);
+    const bH=((bTop-bBot)/rng*100),bp=((bBot-mnL)/rng*100);
     const w=document.createElement('div');w.className='candle-wrap';
     w.innerHTML=`<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;width:100%;"><div class="wick" style="height:${((k.h-bTop)/rng*100).toFixed(1)}%;"></div><div class="${bull?'cbull':'cbear'}" style="width:80%;height:${Math.max(bH,1).toFixed(1)}%;min-height:2px;border-radius:1px;align-self:center;"></div><div class="wick" style="height:${((bBot-k.l)/rng*100).toFixed(1)}%;"></div><div style="height:${bp.toFixed(1)}%;"></div></div>`;
     chart.appendChild(w);
@@ -340,6 +353,7 @@ function renderCandles(klines){
 async function callAI(prompt){
   const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,messages:[{role:'user',content:prompt}]})});
   const d=await r.json();
+  if(d.error) throw new Error('AI error: '+d.error.message);
   const text=d.content[0].text.replace(/```json|```/g,'').trim();
   return JSON.parse(text);
 }
@@ -348,56 +362,67 @@ async function runAnalysis(){
   const sym=document.getElementById('symbol').value;
   const tf=document.getElementById('timeframe').value;
   const btn=document.getElementById('analyzeBtn');
-  btn.disabled=true;btn.textContent='Loading...';
+  btn.disabled=true; btn.textContent='Loading...';
   document.getElementById('a-loading').style.display='block';
   document.getElementById('a-loading').textContent='Fetching market data...';
   document.getElementById('analysis-output').style.display='none';
   document.getElementById('a-error').style.display='none';
   document.getElementById('candle-container').style.display='none';
-  try{
-    const[klines,ticker]=await Promise.all([fetchKlines(sym,tf,100),fetchTicker(sym)]);
-    const{price,rsi,macd,ema20,ema50,structure,swing_high,swing_low}=getIndicators(klines);
-    const change=parseFloat(ticker.priceChangePercent);
-    const vol=parseFloat(ticker.quoteVolume);
+  try {
+    const [klines, ticker] = await Promise.all([fetchKlines(sym,tf,100), fetchTicker(sym)]);
+    const {price,rsi,macd,ema20,ema50,structure,swing_high,swing_low} = getIndicators(klines);
+    const change = parseFloat(ticker.priceChangePercent);
+    const vol = parseFloat(ticker.quoteVolume);
+
     document.getElementById('m-price').textContent='$'+fmtK(price);
-    const ce=document.getElementById('m-change');ce.textContent=(change>=0?'+':'')+fmt(change)+'%';ce.className='metric-value '+(change>=0?'up':'down');
+    const ce=document.getElementById('m-change');
+    ce.textContent=(change>=0?'+':'')+fmt(change)+'%';
+    ce.className='metric-value '+(change>=0?'up':'down');
     document.getElementById('m-vol').textContent='$'+fmtK(vol);
+
     const bullSig=[rsi>45&&rsi<70,macd>0,ema20>ema50,structure.includes('bull')].filter(Boolean).length;
     const bearSig=[rsi<55&&rsi>30,macd<0,ema20<ema50,structure.includes('bear')].filter(Boolean).length;
     const bias=bullSig>bearSig?'Bullish':bearSig>bullSig?'Bearish':'Neutral';
-    const be=document.getElementById('m-bias');be.textContent=bias;be.className='metric-value '+(bias==='Bullish'?'up':bias==='Bearish'?'down':'');
+    const be=document.getElementById('m-bias');
+    be.textContent=bias;
+    be.className='metric-value '+(bias==='Bullish'?'up':bias==='Bearish'?'down':'');
+
     setIndicatorUI(rsi,macd,ema20,ema50,structure);
     renderCandles(klines);
+
     document.getElementById('a-loading').textContent='Running AI analysis...';
-    const parsed=await callAI(`You are a professional crypto futures trader specializing in SMC. Return ONLY a JSON object, no text outside it.
+    const parsed = await callAI(`You are a professional crypto futures trader specializing in SMC. Return ONLY a valid JSON object, no other text.
 Symbol: ${sym} | TF: ${tf} | Price: $${fmt(price)} | 24h: ${fmt(change)}%
 RSI: ${fmt(rsi)} | MACD: ${fmt(macd,4)} | EMA20: ${fmt(ema20,0)} | EMA50: ${fmt(ema50,0)} | Structure: ${structure}
 Swing high: $${swing_high} | Swing low: $${swing_low} | Bias: ${bias}
-{"direction":"LONG|SHORT|WAIT","confidence":"High|Medium|Low","confidence_pct":0-100,"entry":number,"stop_loss":number,"take_profit":number,"rr_ratio":"1:X","order_block":"brief","liquidity_target":"brief","market_maker_trap":"brief","reasoning":"3-5 sentences"}`);
-    lastAnalysis={sym,entry:parsed.entry,sl:parsed.stop_loss,tp:parsed.take_profit};
+Return this exact JSON shape: {"direction":"LONG","confidence":"High","confidence_pct":75,"entry":0,"stop_loss":0,"take_profit":0,"rr_ratio":"1:2","order_block":"description","liquidity_target":"description","market_maker_trap":"description","reasoning":"3-5 sentences"}`);
+
+    lastAnalysis={sym, entry:parsed.entry, sl:parsed.stop_loss, tp:parsed.take_profit};
     const box=document.getElementById('signal-box');
-    box.className='trade-box '+(parsed.direction==='LONG'?'long':parsed.direction==='SHORT'?'short':'wait');
-    document.getElementById('sig-dir').textContent=parsed.direction;
+    const dir=parsed.direction;
+    box.className='trade-box '+(dir==='LONG'?'long':dir==='SHORT'?'short':'wait');
+    document.getElementById('sig-dir').textContent=dir;
     const cb=document.getElementById('sig-conf-badge');
     cb.textContent=parsed.confidence+' confidence';
     cb.className='pill '+(parsed.confidence==='High'?'pill-bull':parsed.confidence==='Medium'?'pill-info':'pill-neut');
     document.getElementById('conf-fill').style.width=(parsed.confidence_pct||50)+'%';
-    if(parsed.rr_ratio&&parsed.direction!=='WAIT'){const rb=document.getElementById('rr-badge');rb.textContent='R:R '+parsed.rr_ratio;rb.style.display='inline-block';}
+    if(parsed.rr_ratio&&dir!=='WAIT'){const rb=document.getElementById('rr-badge');rb.textContent='R:R '+parsed.rr_ratio;rb.style.display='inline-block';}
     document.getElementById('lv-entry').textContent='$'+parseFloat(parsed.entry).toLocaleString();
     document.getElementById('lv-sl').textContent='$'+parseFloat(parsed.stop_loss).toLocaleString();
     document.getElementById('lv-tp').textContent='$'+parseFloat(parsed.take_profit).toLocaleString();
     let reasoning=parsed.reasoning;
-    if(parsed.order_block)reasoning+='\n\nOrder block: '+parsed.order_block;
-    if(parsed.liquidity_target)reasoning+='\nLiquidity target: '+parsed.liquidity_target;
-    if(parsed.market_maker_trap)reasoning+='\nMM trap: '+parsed.market_maker_trap;
+    if(parsed.order_block) reasoning+='\n\nOrder block: '+parsed.order_block;
+    if(parsed.liquidity_target) reasoning+='\nLiquidity target: '+parsed.liquidity_target;
+    if(parsed.market_maker_trap) reasoning+='\nMM trap: '+parsed.market_maker_trap;
     document.getElementById('ai-reasoning').textContent=reasoning;
     document.getElementById('analysis-output').style.display='block';
-  }catch(e){
-    document.getElementById('a-error').textContent='Error: '+e.message+'. Try again or check your connection.';
+  } catch(e) {
+    document.getElementById('a-error').textContent='Error: '+e.message;
     document.getElementById('a-error').style.display='block';
   }
-  btn.disabled=false;btn.textContent='Analyze';
+  btn.disabled=false; btn.textContent='Analyze';
   document.getElementById('a-loading').style.display='none';
+  document.getElementById('a-loading').textContent='Fetching market data...';
 }
 
 function sendToSizer(){
@@ -432,10 +457,10 @@ function calcPosition(){
   document.getElementById('ps-maxgain').textContent='+$'+maxGain.toFixed(2);
   document.getElementById('ps-rr').textContent='1:'+rr.toFixed(2);
   const w=[];
-  if(margin>bal*0.5)w.push('Margin exceeds 50% of account — reduce leverage or size.');
-  if(lev>20)w.push('Leverage above 20x is extreme. Liquidation risk is very high.');
-  if(rr<1.5)w.push('R:R below 1.5 — reward may not justify the risk.');
-  if(risk>2)w.push('Risking over 2% per trade compounds drawdown quickly.');
+  if(margin>bal*0.5) w.push('Margin exceeds 50% of account — reduce leverage or size.');
+  if(lev>20) w.push('Leverage above 20x is extreme. Liquidation risk is very high.');
+  if(rr<1.5) w.push('R:R below 1.5 — reward may not justify the risk.');
+  if(risk>2) w.push('Risking over 2% per trade compounds drawdown quickly.');
   document.getElementById('ps-warning').textContent=w.length?w.join(' '):'\u2713 Risk parameters look healthy.';
   document.getElementById('ps-warning').style.color=w.length?'var(--color-text-warning)':'var(--color-text-success)';
   document.getElementById('ps-results').style.display='block';
@@ -444,29 +469,29 @@ function calcPosition(){
 async function runMTF(){
   const sym=document.getElementById('mtf-symbol').value;
   const btn=document.getElementById('mtfBtn');
-  btn.disabled=true;btn.textContent='Analyzing...';
+  btn.disabled=true; btn.textContent='Analyzing...';
   document.getElementById('mtf-loading').style.display='block';
   document.getElementById('mtf-output').style.display='none';
   document.getElementById('mtf-error').style.display='none';
-  try{
-    const[k1h,k4h,k1d]=await Promise.all([fetchKlines(sym,'1h',100),fetchKlines(sym,'4h',100),fetchKlines(sym,'1d',100)]);
-    const i1h=getIndicators(k1h),i4h=getIndicators(k4h),i1d=getIndicators(k1d);
+  try {
+    const [k1h,k4h,k1d] = await Promise.all([fetchKlines(sym,'1h',100),fetchKlines(sym,'4h',100),fetchKlines(sym,'1d',100)]);
+    const i1h=getIndicators(k1h), i4h=getIndicators(k4h), i1d=getIndicators(k1d);
     const tfData=[{tf:'1H',cls:'tf-1h',ind:i1h},{tf:'4H',cls:'tf-4h',ind:i4h},{tf:'1D',cls:'tf-1d',ind:i1d}];
-    const row=document.getElementById('mtf-row');row.innerHTML='';
+    const row=document.getElementById('mtf-row'); row.innerHTML='';
     tfData.forEach(({tf,cls,ind})=>{
       const bull=[ind.rsi>50,ind.macd>0,ind.ema20>ind.ema50,ind.structure.includes('bull')].filter(Boolean).length;
       const bear=[ind.rsi<50,ind.macd<0,ind.ema20<ind.ema50,ind.structure.includes('bear')].filter(Boolean).length;
       const bias=bull>bear?'Bullish':bear>bull?'Bearish':'Neutral';
       const pc=bias==='Bullish'?'pill-bull':bias==='Bearish'?'pill-bear':'pill-neut';
-      const card=document.createElement('div');card.className='ind-card';
+      const card=document.createElement('div'); card.className='ind-card';
       card.innerHTML=`<div class="ind-name"><span class="tf-badge ${cls}">${tf}</span></div><div class="ind-value" style="margin-top:6px;">${bias}</div><div style="font-size:12px;color:var(--color-text-secondary);margin-top:4px;">RSI ${fmt(ind.rsi)} · ${ind.structure.split(' ')[0]}</div><div class="pill ${pc}" style="margin-top:6px;">${bull}/${bull+bear} signals</div>`;
       row.appendChild(card);
     });
-    const res=await callAI(`MTF analysis for ${sym}. Return ONLY JSON, nothing else.
+    const res = await callAI(`MTF analysis for ${sym}. Return ONLY valid JSON, no other text.
 1H: RSI ${fmt(i1h.rsi)}, MACD ${i1h.macd>0?'pos':'neg'}, EMA ${i1h.ema20>i1h.ema50?'bull':'bear'}, structure: ${i1h.structure}
 4H: RSI ${fmt(i4h.rsi)}, MACD ${i4h.macd>0?'pos':'neg'}, EMA ${i4h.ema20>i4h.ema50?'bull':'bear'}, structure: ${i4h.structure}
 1D: RSI ${fmt(i1d.rsi)}, MACD ${i1d.macd>0?'pos':'neg'}, EMA ${i1d.ema20>i1d.ema50?'bull':'bear'}, structure: ${i1d.structure}
-{"overall_bias":"BULLISH|BEARISH|MIXED","strength":"Strong|Moderate|Weak","aligned":true|false,"reasoning":"3-4 sentences on confluence, dominant trend, entry timing, conflicting signals"}`);
+Return: {"overall_bias":"BULLISH","strength":"Strong","aligned":true,"reasoning":"3-4 sentences"}`);
     const vbox=document.getElementById('mtf-signal-box');
     vbox.className='trade-box '+(res.overall_bias==='BULLISH'?'long':res.overall_bias==='BEARISH'?'short':'wait');
     document.getElementById('mtf-verdict').textContent=res.overall_bias;
@@ -475,11 +500,11 @@ async function runMTF(){
     sb.className='pill '+(res.strength==='Strong'?'pill-bull':res.strength==='Moderate'?'pill-info':'pill-neut');
     document.getElementById('mtf-reasoning').textContent=res.reasoning;
     document.getElementById('mtf-output').style.display='block';
-  }catch(e){
+  } catch(e) {
     document.getElementById('mtf-error').textContent='Error: '+e.message;
     document.getElementById('mtf-error').style.display='block';
   }
-  btn.disabled=false;btn.textContent='Run MTF analysis';
+  btn.disabled=false; btn.textContent='Run MTF analysis';
   document.getElementById('mtf-loading').style.display='none';
 }
 
@@ -504,16 +529,20 @@ function renderJournal(){
   const empty=document.getElementById('journal-empty');
   const stats=document.getElementById('journal-stats');
   if(!trades.length){empty.style.display='block';stats.style.display='none';list.innerHTML='';return;}
-  empty.style.display='none';stats.style.display='block';
+  empty.style.display='none'; stats.style.display='block';
   const wins=trades.filter(t=>t.outcome==='Win').length;
   const totalPnl=trades.reduce((s,t)=>s+t.pnl,0);
   document.getElementById('js-total').textContent=trades.length;
-  const wrEl=document.getElementById('js-wr');wrEl.textContent=Math.round(wins/trades.length*100)+'%';wrEl.style.color=wins/trades.length>=0.5?'var(--color-text-success)':'var(--color-text-danger)';
-  const pnlEl=document.getElementById('js-pnl');pnlEl.textContent=(totalPnl>=0?'+':'')+totalPnl.toFixed(2);pnlEl.style.color=totalPnl>=0?'var(--color-text-success)':'var(--color-text-danger)';
+  const wrEl=document.getElementById('js-wr');
+  wrEl.textContent=Math.round(wins/trades.length*100)+'%';
+  wrEl.style.color=wins/trades.length>=0.5?'var(--color-text-success)':'var(--color-text-danger)';
+  const pnlEl=document.getElementById('js-pnl');
+  pnlEl.textContent=(totalPnl>=0?'+':'')+totalPnl.toFixed(2);
+  pnlEl.style.color=totalPnl>=0?'var(--color-text-success)':'var(--color-text-danger)';
   document.getElementById('js-avg').textContent=(totalPnl/trades.length>=0?'+':'')+(totalPnl/trades.length).toFixed(2);
   list.innerHTML='';
   trades.forEach(t=>{
-    const el=document.createElement('div');el.className='journal-entry';
+    const el=document.createElement('div'); el.className='journal-entry';
     const oc=t.outcome==='Win'?'pill-bull':t.outcome==='Loss'?'pill-bear':'pill-neut';
     const pc=t.pnl>0?'var(--color-text-success)':t.pnl<0?'var(--color-text-danger)':'var(--color-text-secondary)';
     el.innerHTML=`<div class="je-header"><span class="je-pair">${t.pair} · ${t.dir}</span><span class="je-date">${t.date}</span></div>
